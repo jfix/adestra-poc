@@ -42,7 +42,16 @@
   .result { margin-top:14px; padding:10px 12px; border-radius:6px; font-weight:600; }
   .result.ok { background:#dcfce7; color:var(--ok); }
   .result.fail { background:#fee2e2; color:var(--err); }
-  .hidden { display:none; }
+  .hidden { display:none !important; }
+  .modes { display:flex; gap:0; border:1px solid var(--line); border-radius:6px; overflow:hidden; margin-bottom:14px; width:max-content; }
+  .modes label { margin:0; padding:6px 12px; font-size:13px; cursor:pointer; color:var(--text); display:flex; gap:6px; align-items:center; }
+  .modes label.on { background:#111827; color:#fff; }
+  .modes input { width:auto; margin:0; }
+  .modal-bg { position:fixed; inset:0; background:rgba(15,23,42,.45); display:flex; align-items:center; justify-content:center; z-index:10; }
+  .modal { background:#fff; border-radius:12px; padding:28px 28px 22px; max-width:400px; width:calc(100% - 32px); box-shadow:0 20px 50px rgba(0,0,0,.25); text-align:center; }
+  .modal .big { font-size:40px; line-height:1; margin-bottom:10px; }
+  .modal h3 { margin:0 0 8px; font-size:18px; }
+  .modal p { margin:0 0 18px; color:var(--muted); }
   .http { margin-top:6px; font-size:12px; color:var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .http b { color:var(--text); font-weight:600; }
   .hint { margin-top:6px; font-size:13px; color:var(--warn); background:#fffbeb; border:1px solid #fde68a; border-radius:6px; padding:6px 8px; }
@@ -62,20 +71,24 @@
 <body>
 <main>
   <h1>Adestra double opt-in <span id="modeBadge"></span></h1>
-  <p class="sub">Adds an address to a list and sends the welcome / confirmation email through the Adestra REST API.</p>
+  <p class="sub">Sign-up form that stays on the page. The server relays the submission to Adestra (form handler or REST API), and Adestra sends the confirmation email.</p>
 
   <div class="card">
+    <div class="modes" id="modes">
+      <label id="modeFormLbl"><input type="radio" name="mode" value="form" id="modeForm"> Form relay</label>
+      <label id="modeApiLbl"><input type="radio" name="mode" value="api" id="modeApi"> REST API</label>
+    </div>
     <form id="form">
       <div class="row">
         <div><label for="email">Email address</label><input id="email" type="email" required placeholder="someone@example.com" autofocus></div>
         <div><label for="firstname">First name (optional)</label><input id="firstname" type="text" placeholder="Jane"></div>
       </div>
-      <div class="row">
+      <div class="row" id="apiRow">
         <div><label for="listId">List ID</label><input id="listId" type="text" inputmode="numeric" placeholder="from .env"></div>
         <div><label for="campaignId">Welcome campaign ID</label><input id="campaignId" type="text" inputmode="numeric" placeholder="from .env"></div>
       </div>
       <div class="toolbar">
-        <button id="go" type="submit">Subscribe &amp; send opt-in email</button>
+        <button id="go" type="submit">Subscribe</button>
         <button id="test" type="button" class="secondary">Test connection</button>
         <label style="margin:0;display:flex;align-items:center;gap:6px"><input type="checkbox" id="debug" style="width:auto"> show HTTP details</label>
       </div>
@@ -94,6 +107,15 @@
     <div id="result" class="result hidden"></div>
   </div>
 
+  <div class="modal-bg hidden" id="popup" role="dialog" aria-modal="true">
+    <div class="modal">
+      <div class="big">📬</div>
+      <h3>Check your inbox</h3>
+      <p>We sent a confirmation email to <b id="popupEmail"></b>. Click the link in it to complete your subscription.</p>
+      <button type="button" id="popupClose">OK</button>
+    </div>
+  </div>
+
   <div class="card hidden" id="logCard">
     <h2>Event log <span><button type="button" class="secondary small" id="copyLog">copy</button> <button type="button" class="secondary small" id="clearLog">clear</button></span></h2>
     <pre class="log" id="log"></pre>
@@ -102,15 +124,45 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const STEP_TITLES = ["Look up list", "Create or update contact", "Add contact to list", "Send opt-in email"];
+const STEP_TITLES = {
+  form: ["Build the form submission", "Relay to the Adestra form handler", "What happens next in Adestra"],
+  api:  ["Look up list", "Create or update contact", "Add contact to list", "Send opt-in email"],
+};
+let cfg = null;
+const mode = () => $("modeApi").checked ? "api" : "form";
+function applyMode() {
+  const m = mode();
+  $("modeFormLbl").classList.toggle("on", m === "form");
+  $("modeApiLbl").classList.toggle("on", m === "api");
+  $("apiRow").classList.toggle("hidden", m === "form");
+  $("go").textContent = m === "form" ? "Subscribe" : "Subscribe & send opt-in email";
+  $("test").classList.toggle("hidden", m === "form");
+  if (!cfg) return;
+  $("cfg").innerHTML = m === "form"
+    ? (cfg.form.configured
+        ? `Relays to <code>${esc(cfg.form.url)}</code> · hidden fields: ${cfg.form.hiddenFieldNames.map(esc).map(x => `<code>${x}</code>`).join(" ") || "none"} · email field <code>${esc(cfg.form.emailField)}</code>`
+        : (cfg.mock ? 'Mock: the relay is simulated, no form handler URL needed.' : '<span class="badge missing">ADESTRA_FORM_URL missing</span> set the form handler URL and hidden fields in .env'))
+    : `API base <code>${esc(cfg.baseUrl)}</code> · token ${cfg.tokenSet ? `<code>${esc(cfg.tokenMasked)}</code>` : '<span class="badge missing">missing</span>'} · node ${esc(cfg.node)}`;
+}
+$("modeForm").addEventListener("change", applyMode);
+$("modeApi").addEventListener("change", applyMode);
 
 fetch("/api/config").then(r => r.json()).then(c => {
+  cfg = c;
   $("listId").value = c.listId || "";
   $("campaignId").value = c.campaignId || "";
-  $("cfg").innerHTML = `API base <code>${c.baseUrl}</code> · token ${c.tokenSet ? `<code>${c.tokenMasked}</code>` : '<span class="badge missing">missing</span>'} · node ${c.node}`;
+  (c.mode === "api" ? $("modeApi") : $("modeForm")).checked = true;
   if (c.mock) $("modeBadge").innerHTML = '<span class="badge mock">MOCK MODE</span>';
+  applyMode();
   log("config", c);
 });
+applyMode();
+
+// ---- "check your inbox" popup: the user stays on the page ----
+function showPopup(email) { $("popupEmail").textContent = email; $("popup").classList.remove("hidden"); $("popupClose").focus(); }
+$("popupClose").onclick = () => $("popup").classList.add("hidden");
+$("popup").addEventListener("click", (e) => { if (e.target === $("popup")) $("popup").classList.add("hidden"); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("popup").classList.add("hidden"); });
 
 // ---- debug toggle (remembered per browser) ----
 try { $("debug").checked = localStorage.getItem("adestra-debug") === "1"; } catch {}
@@ -149,7 +201,7 @@ function exchangeHtml(ex) {
 }
 
 function renderSteps() {
-  $("steps").innerHTML = STEP_TITLES.map((t, i) =>
+  $("steps").innerHTML = STEP_TITLES[mode()].map((t, i) =>
     `<li id="step${i+1}" class="pending"><div class="icon">○</div><div><div class="title">${t}</div><div class="msg"></div></div></li>`).join("");
   $("result").className = "result hidden";
   $("progress").classList.remove("hidden");
@@ -203,11 +255,11 @@ $("form").addEventListener("submit", async (e) => {
   e.preventDefault();
   $("go").disabled = true;
   renderSteps();
-  log("submit", { email: $("email").value, listId: $("listId").value, campaignId: $("campaignId").value });
+  log("submit", { mode: mode(), email: $("email").value, listId: $("listId").value, campaignId: $("campaignId").value });
   try {
     const res = await fetch("/api/optin", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: $("email").value, firstname: $("firstname").value, listId: $("listId").value, campaignId: $("campaignId").value }),
+      body: JSON.stringify({ mode: mode(), email: $("email").value, firstname: $("firstname").value, listId: $("listId").value, campaignId: $("campaignId").value }),
     });
     const reader = res.body.getReader();
     const dec = new TextDecoder();
@@ -222,7 +274,13 @@ $("form").addEventListener("submit", async (e) => {
         if (!line) continue;
         const ev = JSON.parse(line);
         if (ev.type === "step") updateStep(ev);
-        else if (ev.type === "done") showResult(ev.ok, ev.ok ? `Done. ${$("email").value} is on the list and the opt-in email was accepted.` : `Failed: ${ev.message}`);
+        else if (ev.type === "done") {
+          const m = mode();
+          showResult(ev.ok, ev.ok
+            ? (m === "form" ? `Submitted. Adestra accepted ${$("email").value}; the confirmation email is sent by the form's actions.` : `Done. ${$("email").value} is on the list and the opt-in email was accepted.`)
+            : `Failed: ${ev.message}`);
+          if (ev.ok) showPopup($("email").value);
+        }
       }
     }
   } catch (err) {

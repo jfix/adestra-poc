@@ -1,13 +1,17 @@
 // Adestra double opt-in proof of concept.
 // Zero dependencies. Requires Node 18+ (built-in fetch).
 //
-// Flow per request:
-//   1. GET  /lists/{list_id}                       -> verify token + list, learn table_id
-//   2. POST /contacts  {table_id, contact_data}    -> create (or dedupe-update) contact by email
-//   3. POST /contacts/{contact_id}/lists/{list_id} -> add contact to the list
-//   4. POST /campaigns/{campaign_id}/send_single   -> send the welcome / opt-in email
+// Two sign-up mechanisms, selectable per request (default from ADESTRA_MODE):
 //
-// Config comes from .env (see .env.example). The API token never leaves this process.
+//   "form" (relay, recommended): the browser posts to THIS server, which posts the fields
+//   server-to-server to the Adestra form handler (the same endpoint an Adestra static /
+//   Form Builder form would post to). Adestra runs the form's actions (add to program ->
+//   automation sends the confirmation campaign -> verified contacts land on the real list).
+//   The browser never leaves the page; success is detected by the redirect to the return URL.
+//
+//   "api": REST API v1 calls: look up list, create contact, add to list, send_single campaign.
+//
+// Config comes from .env (see .env.example). Secrets and Adestra ids never reach the browser.
 
 const http = require("http");
 const fs = require("fs");
@@ -31,6 +35,14 @@ const CONFIG = {
   campaignId: process.env.ADESTRA_CAMPAIGN_ID || "",
   mock: process.env.ADESTRA_MOCK === "1",
   port: Number(process.env.PORT || 3000),
+  mode: process.env.ADESTRA_MODE === "api" ? "api" : "form",
+  form: {
+    url: process.env.ADESTRA_FORM_URL || "",
+    hidden: process.env.ADESTRA_FORM_HIDDEN || "",          // urlencoded, e.g. _account_id=1&_table_id=1&_list_id=4
+    emailField: process.env.ADESTRA_FORM_EMAIL_FIELD || "1.email",
+    firstnameField: process.env.ADESTRA_FORM_FIRSTNAME_FIELD || "",
+    returnUrl: process.env.ADESTRA_FORM_RETURN_URL || "https://example.invalid/adestra-poc-ok",
+  },
 };
 const BASE = `https://${CONFIG.domain}/api/rest/1`;
 
@@ -107,6 +119,7 @@ async function mockResponse(method, endpoint, body) {
 
 // Plain-language hints for the errors we have actually seen or that the docs call out.
 function hintFor(e) {
+  if (e.exchange && e.exchange.kind === "form") return null;   // relay verdicts already explain themselves
   const body = e.exchange && e.exchange.responseBody ? String(e.exchange.responseBody) : "";
   if (e.exchange && e.exchange.networkError) return "Could not reach the API host at all. Check ADESTRA_DOMAIN, DNS and outbound HTTPS.";
   if (e.status === 401 && /"ip"/.test(body)) return "Token is valid but this machine's public IP is not on the token/user IP allowlist in Adestra. Allowlist the public IP shown in the connection test.";
@@ -123,19 +136,103 @@ function hintFor(e) {
   return null;
 }
 
-// ---------- the opt-in flow, streamed as NDJSON events ----------
-async function runOptIn({ email, firstname, listId, campaignId }, emit) {
-  const step = async (n, title, fn) => {
+// ---------- form relay ----------
+// Builds the exact field set an Adestra static form would submit.
+function buildFormFields({ email, firstname }) {
+  const params = new URLSearchParams(CONFIG.form.hidden);
+  params.set(CONFIG.form.emailField, email);
+  if (firstname && CONFIG.form.firstnameField) params.set(CONFIG.form.firstnameField, firstname);
+  if (!params.has("_rp")) params.set("_rp", CONFIG.form.returnUrl);   // return URL = our success signal
+  return params;
+}
+
+// POSTs the fields server-to-server to the Adestra form handler. Never follows the redirect:
+// a 3xx to the return URL is the success signal. Returns { verdict, exchange }.
+async function relayForm(params) {
+  const url = CONFIG.form.url;
+  const body = params.toString();
+  const exchange = { kind: "form", method: "POST", url, requestBody: body, requestFields: Object.fromEntries([...params.entries()]),
+    curl: `curl -i -X POST -H 'Content-Type: application/x-www-form-urlencoded' --data '${body.replace(/'/g, "'\\''")}' '${url}'`,
+    mock: CONFIG.mock, startedAt: new Date().toISOString() };
+  const t0 = Date.now();
+
+  if (CONFIG.mock) {
+    await new Promise((r) => setTimeout(r, 400));
+    const rp = params.get("_rp");
+    Object.assign(exchange, { status: 302, statusText: "Found", durationMs: Date.now() - t0, responseHeaders: { location: rp, "x-mock": "1" }, responseBody: "" });
+    return { verdict: interpretFormResponse(302, rp, "", params), exchange };
+  }
+
+  let res, text;
+  try {
+    res = await fetch(url, { method: "POST", redirect: "manual", body,
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "text/html,*/*", "User-Agent": "adestra-poc-relay/1.0" } });
+    text = await res.text();
+  } catch (e) {
+    Object.assign(exchange, { status: 0, durationMs: Date.now() - t0, responseBody: null, networkError: `${e.name}: ${e.message}${e.cause ? ` (${e.cause.code || e.cause.message})` : ""}` });
+    const err = new Error(`Network error: ${exchange.networkError}`); err.exchange = exchange; throw err;
+  }
+  const responseHeaders = {};
+  for (const h of ["location", "content-type", "content-length", "date", "server", "set-cookie", "x-request-id"]) {
+    const v = res.headers.get(h); if (v) responseHeaders[h] = v;
+  }
+  Object.assign(exchange, { status: res.status, statusText: res.statusText, durationMs: Date.now() - t0, responseHeaders, responseBody: text.slice(0, 4000) });
+  return { verdict: interpretFormResponse(res.status, res.headers.get("location"), text, params), exchange };
+}
+
+// Decides what the handler's reply means. The static-form handler redirects to _rp on success.
+function interpretFormResponse(status, location, bodyText, params) {
+  const rp = params.get("_rp");
+  const bodyLower = (bodyText || "").toLowerCase();
+  if (status >= 300 && status < 400 && location) {
+    if (rp && location.startsWith(rp)) return { ok: true, message: `Accepted: redirected to the return URL (${location})` };
+    return { ok: true, warn: true, message: `Redirected to ${location}, which is not the configured return URL. Probably accepted, but check where it went.` };
+  }
+  if (status === 200 && /thank|confirm|success/.test(bodyLower))
+    return { ok: true, warn: true, message: "Got a 200 page that looks like a thank-you page, so the handler ignored _rp. Treating as accepted." };
+  if (status === 200) return { ok: false, message: "Got 200 with an unexpected page: the handler probably re-rendered the form (validation / CAPTCHA / missing field). See response body." };
+  if (status === 403) return { ok: false, message: "403 Forbidden: the handler rejected a server-side submission (bot protection, referrer or CAPTCHA requirement). Ask Adestra support." };
+  if (status === 404) return { ok: false, message: "404: form handler URL is wrong. Check ADESTRA_FORM_URL (usually https://<domain>.msgfocus.com/s/)." };
+  return { ok: false, message: `Unexpected HTTP ${status} from the form handler. See response body.` };
+}
+
+async function runOptInForm({ email, firstname }, emit) {
+  const step = makeStepper(emit);
+  const params = await step(1, "Build the form submission", async () => {
+    const p = buildFormFields({ email, firstname });
+    const fields = Object.fromEntries([...p.entries()]);
+    return { message: `${[...p.keys()].length} fields for ${CONFIG.form.url || "(mock)"}`, detail: fields, value: p };
+  });
+  const relay = await step(2, "Relay to the Adestra form handler", async () => {
+    const { verdict, exchange } = await relayForm(params.value);
+    if (!verdict.ok) { const err = new Error(verdict.message); err.exchange = exchange; err.status = exchange.status; throw err; }
+    return { message: verdict.message, warn: verdict.warn, exchange, value: verdict };
+  });
+  await step(3, "What happens next in Adestra", async () => ({
+    message: "The form's actions run now (e.g. add to program -> confirmation campaign -> verified list). The confirmation click is handled by Adestra link tracking.",
+    detail: { returnUrlUsed: params.value.get("_rp"), verdict: relay.value },
+  }));
+  emit({ type: "done", ok: true, popup: true });
+}
+
+function makeStepper(emit) {
+  return async (n, title, fn) => {
     emit({ type: "step", n, title, state: "running" });
     try {
       const result = await fn();
-      emit({ type: "step", n, title, state: "ok", ...result });
+      const { value, ...pub } = result;     // "value" is internal, not sent to the browser
+      emit({ type: "step", n, title, state: "ok", ...pub });
       return result;
     } catch (e) {
       emit({ type: "step", n, title, state: "error", message: e.message, detail: e.data ?? null, exchange: e.exchange ?? null, hint: hintFor(e) });
       throw e;
     }
   };
+}
+
+// ---------- the REST API flow, streamed as NDJSON events ----------
+async function runOptInApi({ email, firstname, listId, campaignId }, emit) {
+  const step = makeStepper(emit);
 
   const list = await step(1, `Look up list ${listId}`, async () => {
     const { data, exchange } = await adestra("GET", `/lists/${listId}`);
@@ -181,6 +278,9 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify({
       domain: CONFIG.domain, baseUrl: BASE, tokenSet: Boolean(CONFIG.token), tokenMasked: maskToken(CONFIG.token),
       listId: CONFIG.listId, campaignId: CONFIG.campaignId, mock: CONFIG.mock, node: process.version,
+      mode: CONFIG.mode,
+      form: { url: CONFIG.form.url, configured: Boolean(CONFIG.form.url), hiddenFieldNames: [...new URLSearchParams(CONFIG.form.hidden).keys()],
+              emailField: CONFIG.form.emailField, firstnameField: CONFIG.form.firstnameField || null, returnUrl: CONFIG.form.returnUrl },
     }));
   }
 
@@ -211,26 +311,32 @@ const server = http.createServer(async (req, res) => {
     const firstname = String(body.firstname || "").trim();
     const listId = String(body.listId || CONFIG.listId).trim();
     const campaignId = String(body.campaignId || CONFIG.campaignId).trim();
+    const mode = body.mode === "api" || body.mode === "form" ? body.mode : CONFIG.mode;
 
     res.writeHead(200, { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache", "X-Accel-Buffering": "no" });
     const emit = (ev) => res.write(JSON.stringify(ev) + "\n");
 
     const problems = [];
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) problems.push("Enter a valid email address.");
-    if (!CONFIG.token && !CONFIG.mock) problems.push("ADESTRA_API_TOKEN is not set in .env.");
-    if (!/^\d+$/.test(listId)) problems.push("List ID must be a number (the Adestra list's numeric id).");
-    if (!/^\d+$/.test(campaignId)) problems.push("Campaign ID must be a number (the published welcome/opt-in campaign).");
+    if (mode === "form") {
+      if (!CONFIG.form.url && !CONFIG.mock) problems.push("ADESTRA_FORM_URL is not set in .env (the form handler, e.g. https://<domain>.msgfocus.com/s/).");
+      else if (CONFIG.form.url && !/^https?:\/\//.test(CONFIG.form.url)) problems.push("ADESTRA_FORM_URL must be a full http(s) URL.");
+    } else {
+      if (!CONFIG.token && !CONFIG.mock) problems.push("ADESTRA_API_TOKEN is not set in .env.");
+      if (!/^\d+$/.test(listId)) problems.push("List ID must be a number (the Adestra list's numeric id).");
+      if (!/^\d+$/.test(campaignId)) problems.push("Campaign ID must be a number (the published welcome/opt-in campaign).");
+    }
     if (problems.length) {
       emit({ type: "done", ok: false, message: problems.join(" ") });
       return res.end();
     }
 
-    console.log(`[optin] ${email} -> list ${listId}, campaign ${campaignId}${CONFIG.mock ? " (MOCK)" : ""}`);
+    console.log(`[optin:${mode}] ${email}${mode === "api" ? ` -> list ${listId}, campaign ${campaignId}` : ` -> ${CONFIG.form.url || "(no form url)"}`}${CONFIG.mock ? " (MOCK)" : ""}`);
     const logEmit = (ev) => {
       if (ev.type === "step" && ev.exchange) console.log(`  ${ev.exchange.method} ${ev.exchange.url} -> ${ev.exchange.status} (${ev.exchange.durationMs} ms) ${ev.state === "error" ? ev.message : ""}`);
       emit(ev);
     };
-    try { await runOptIn({ email, firstname, listId, campaignId }, logEmit); }
+    try { await (mode === "form" ? runOptInForm({ email, firstname }, logEmit) : runOptInApi({ email, firstname, listId, campaignId }, logEmit)); }
     catch (e) { emit({ type: "done", ok: false, message: e.message }); }
     return res.end();
   }
@@ -241,5 +347,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(CONFIG.port, () => {
   console.log(`Adestra opt-in PoC listening on http://localhost:${CONFIG.port}`);
   console.log(`  API base: ${BASE}${CONFIG.mock ? "  (MOCK MODE - no real calls)" : ""}`);
-  console.log(`  token: ${CONFIG.token ? "set" : "MISSING"}  list: ${CONFIG.listId || "-"}  campaign: ${CONFIG.campaignId || "-"}`);
+  console.log(`  default mode: ${CONFIG.mode}`);
+  console.log(`  form relay: ${CONFIG.form.url || "ADESTRA_FORM_URL MISSING"}  hidden fields: ${[...new URLSearchParams(CONFIG.form.hidden).keys()].join(",") || "-"}`);
+  console.log(`  api: token ${CONFIG.token ? "set" : "MISSING"}  list: ${CONFIG.listId || "-"}  campaign: ${CONFIG.campaignId || "-"}`);
 });
