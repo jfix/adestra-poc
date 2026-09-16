@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Adestra opt-in PoC</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1c1f24; --muted:#6b7280; --line:#e5e7eb; --ok:#15803d; --err:#b91c1c; --warn:#b45309; --run:#2563eb; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui, -apple-system, Segoe UI, sans-serif; }
+  main { max-width: 640px; margin: 40px auto; padding: 0 16px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:20px; margin-bottom:16px; }
+  label { display:block; font-size:13px; color:var(--muted); margin-bottom:4px; }
+  input { width:100%; padding:9px 10px; border:1px solid var(--line); border-radius:6px; font:inherit; }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px; }
+  .row.single { grid-template-columns:1fr; }
+  button { padding:10px 16px; border:0; border-radius:6px; background:#111827; color:#fff; font:inherit; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  .cfg { font-size:13px; color:var(--muted); }
+  .cfg code { background:#eef0f3; padding:1px 5px; border-radius:4px; }
+  .badge { display:inline-block; font-size:11px; font-weight:600; padding:1px 7px; border-radius:99px; margin-left:6px; vertical-align:middle; }
+  .badge.mock { background:#fef3c7; color:var(--warn); }
+  .badge.missing { background:#fee2e2; color:var(--err); }
+  ol.steps { list-style:none; padding:0; margin:0; }
+  ol.steps li { display:grid; grid-template-columns:24px 1fr; gap:10px; padding:10px 0; border-top:1px solid var(--line); }
+  ol.steps li:first-child { border-top:0; }
+  .icon { font-weight:700; text-align:center; }
+  .pending .icon { color:var(--line); }
+  .running .icon { color:var(--run); }
+  .ok .icon { color:var(--ok); }
+  .warn .icon { color:var(--warn); }
+  .error .icon { color:var(--err); }
+  .title { font-weight:600; }
+  .msg { color:var(--muted); font-size:14px; }
+  .error .msg { color:var(--err); }
+  .warn .msg { color:var(--warn); }
+  details { margin-top:4px; }
+  summary { font-size:12px; color:var(--muted); cursor:pointer; }
+  pre { margin:6px 0 0; font-size:12px; background:#f3f4f6; padding:8px; border-radius:6px; overflow-x:auto; }
+  .result { margin-top:14px; padding:10px 12px; border-radius:6px; font-weight:600; }
+  .result.ok { background:#dcfce7; color:var(--ok); }
+  .result.fail { background:#fee2e2; color:var(--err); }
+  .hidden { display:none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .running .icon span { display:inline-block; animation: spin 1s linear infinite; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Adestra double opt-in <span id="modeBadge"></span></h1>
+  <p class="sub">Adds an address to a list and sends the welcome / confirmation email through the Adestra REST API.</p>
+
+  <div class="card">
+    <form id="form">
+      <div class="row">
+        <div><label for="email">Email address</label><input id="email" type="email" required placeholder="someone@example.com" autofocus></div>
+        <div><label for="firstname">First name (optional)</label><input id="firstname" type="text" placeholder="Jane"></div>
+      </div>
+      <div class="row">
+        <div><label for="listId">List ID</label><input id="listId" type="text" inputmode="numeric" placeholder="from .env"></div>
+        <div><label for="campaignId">Welcome campaign ID</label><input id="campaignId" type="text" inputmode="numeric" placeholder="from .env"></div>
+      </div>
+      <button id="go" type="submit">Subscribe &amp; send opt-in email</button>
+    </form>
+    <p class="cfg" id="cfg">Loading config…</p>
+  </div>
+
+  <div class="card hidden" id="progress">
+    <ol class="steps" id="steps"></ol>
+    <div id="result" class="result hidden"></div>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const STEP_TITLES = ["Look up list", "Create or update contact", "Add contact to list", "Send opt-in email"];
+
+fetch("/api/config").then(r => r.json()).then(c => {
+  $("listId").value = c.listId || "";
+  $("campaignId").value = c.campaignId || "";
+  $("cfg").innerHTML = `API base <code>${c.baseUrl}</code> · token ${c.tokenSet ? "set" : '<span class="badge missing">missing</span>'}`;
+  if (c.mock) $("modeBadge").innerHTML = '<span class="badge mock">MOCK MODE</span>';
+});
+
+function renderSteps() {
+  $("steps").innerHTML = STEP_TITLES.map((t, i) =>
+    `<li id="step${i+1}" class="pending"><div class="icon">○</div><div><div class="title">${t}</div><div class="msg"></div></div></li>`).join("");
+  $("result").className = "result hidden";
+  $("progress").classList.remove("hidden");
+}
+
+function updateStep(ev) {
+  const li = $("step" + ev.n);
+  if (!li) return;
+  const state = ev.state === "ok" && ev.warn ? "warn" : ev.state;
+  li.className = state;
+  li.querySelector(".icon").innerHTML = { running: "<span>◐</span>", ok: "✓", warn: "!", error: "✕" }[state] || "○";
+  li.querySelector(".title").textContent = ev.title;
+  const msg = li.querySelector(".msg");
+  msg.textContent = ev.message || (state === "running" ? "…" : "");
+  if (ev.detail) {
+    const d = document.createElement("details");
+    d.innerHTML = `<summary>response</summary><pre>${JSON.stringify(ev.detail, null, 2).replace(/</g, "&lt;")}</pre>`;
+    msg.appendChild(d);
+  }
+}
+
+function showResult(ok, text) {
+  const r = $("result");
+  r.className = "result " + (ok ? "ok" : "fail");
+  r.textContent = text;
+}
+
+$("form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  $("go").disabled = true;
+  renderSteps();
+  try {
+    const res = await fetch("/api/optin", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: $("email").value, firstname: $("firstname").value, listId: $("listId").value, campaignId: $("campaignId").value }),
+    });
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+        if (!line) continue;
+        const ev = JSON.parse(line);
+        if (ev.type === "step") updateStep(ev);
+        else if (ev.type === "done") showResult(ev.ok, ev.ok ? `Done. ${$("email").value} is on the list and the opt-in email was accepted.` : `Failed: ${ev.message}`);
+      }
+    }
+  } catch (err) {
+    showResult(false, "Request failed: " + err.message);
+  } finally {
+    $("go").disabled = false;
+  }
+});
+</script>
+</body>
+</html>

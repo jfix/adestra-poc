@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "adestra-poc",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["server.js"],
+      "port": 3000
+    },
+    {
+      "name": "adestra-poc-mock",
+      "runtimeExecutable": "env",
+      "runtimeArgs": ["ADESTRA_MOCK=1", "ADESTRA_LIST_ID=7", "ADESTRA_CAMPAIGN_ID=16", "PORT=3000", "node", "server.js"],
+      "port": 3000
+    }
+  ]
+}
