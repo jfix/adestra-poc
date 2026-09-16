@@ -43,6 +43,18 @@
   .result.ok { background:#dcfce7; color:var(--ok); }
   .result.fail { background:#fee2e2; color:var(--err); }
   .hidden { display:none; }
+  .http { margin-top:6px; font-size:12px; color:var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .http b { color:var(--text); font-weight:600; }
+  .hint { margin-top:6px; font-size:13px; color:var(--warn); background:#fffbeb; border:1px solid #fde68a; border-radius:6px; padding:6px 8px; }
+  .kv { display:grid; grid-template-columns:140px 1fr; gap:4px 10px; font-size:13px; margin:0; }
+  .kv dt { color:var(--muted); } .kv dd { margin:0; word-break:break-all; }
+  .toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:12px; }
+  button.secondary { background:#fff; color:var(--text); border:1px solid var(--line); font-weight:500; }
+  button.small { padding:4px 10px; font-size:12px; }
+  .log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11px; background:#0f172a; color:#cbd5e1; padding:10px; border-radius:6px; max-height:260px; overflow:auto; white-space:pre-wrap; word-break:break-all; margin:0; }
+  .log .t { color:#64748b; } .log .ok { color:#4ade80; } .log .err { color:#f87171; } .log .run { color:#60a5fa; }
+  h2 { font-size:14px; margin:0 0 10px; }
+  .card h2 { display:flex; justify-content:space-between; align-items:center; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .running .icon span { display:inline-block; animation: spin 1s linear infinite; }
 </style>
@@ -62,14 +74,29 @@
         <div><label for="listId">List ID</label><input id="listId" type="text" inputmode="numeric" placeholder="from .env"></div>
         <div><label for="campaignId">Welcome campaign ID</label><input id="campaignId" type="text" inputmode="numeric" placeholder="from .env"></div>
       </div>
-      <button id="go" type="submit">Subscribe &amp; send opt-in email</button>
+      <div class="toolbar">
+        <button id="go" type="submit">Subscribe &amp; send opt-in email</button>
+        <button id="test" type="button" class="secondary">Test connection</button>
+        <label style="margin:0;display:flex;align-items:center;gap:6px"><input type="checkbox" id="debug" style="width:auto"> show HTTP details</label>
+      </div>
     </form>
     <p class="cfg" id="cfg">Loading config…</p>
+  </div>
+
+  <div class="card hidden" id="diag">
+    <h2>Connection test <button type="button" class="secondary small" onclick="document.getElementById('diag').classList.add('hidden')">hide</button></h2>
+    <dl class="kv" id="diagKv"></dl>
+    <div id="diagProbe"></div>
   </div>
 
   <div class="card hidden" id="progress">
     <ol class="steps" id="steps"></ol>
     <div id="result" class="result hidden"></div>
+  </div>
+
+  <div class="card hidden" id="logCard">
+    <h2>Event log <span><button type="button" class="secondary small" id="copyLog">copy</button> <button type="button" class="secondary small" id="clearLog">clear</button></span></h2>
+    <pre class="log" id="log"></pre>
   </div>
 </main>
 
@@ -80,9 +107,46 @@ const STEP_TITLES = ["Look up list", "Create or update contact", "Add contact to
 fetch("/api/config").then(r => r.json()).then(c => {
   $("listId").value = c.listId || "";
   $("campaignId").value = c.campaignId || "";
-  $("cfg").innerHTML = `API base <code>${c.baseUrl}</code> · token ${c.tokenSet ? "set" : '<span class="badge missing">missing</span>'}`;
+  $("cfg").innerHTML = `API base <code>${c.baseUrl}</code> · token ${c.tokenSet ? `<code>${c.tokenMasked}</code>` : '<span class="badge missing">missing</span>'} · node ${c.node}`;
   if (c.mock) $("modeBadge").innerHTML = '<span class="badge mock">MOCK MODE</span>';
+  log("config", c);
 });
+
+// ---- debug toggle (remembered per browser) ----
+try { $("debug").checked = localStorage.getItem("adestra-debug") === "1"; } catch {}
+$("debug").addEventListener("change", () => {
+  try { localStorage.setItem("adestra-debug", $("debug").checked ? "1" : "0"); } catch {}
+  document.querySelectorAll("details.http-details").forEach(d => d.open = $("debug").checked);
+});
+
+// ---- event log ----
+const logLines = [];
+function log(kind, obj, cls) {
+  const t = new Date().toISOString().slice(11, 23);
+  const text = typeof obj === "string" ? obj : JSON.stringify(obj);
+  logLines.push(`${t} ${kind} ${text}`);
+  const el = $("log");
+  el.insertAdjacentHTML("beforeend", `<span class="t">${t}</span> <span class="${cls || ""}">${kind}</span> ${esc(text)}\n`);
+  el.scrollTop = el.scrollHeight;
+  $("logCard").classList.remove("hidden");
+}
+$("copyLog").onclick = () => navigator.clipboard.writeText(logLines.join("\n")).catch(() => {});
+$("clearLog").onclick = () => { logLines.length = 0; $("log").textContent = ""; };
+const esc = (x) => String(x).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+const pretty = (x) => { if (x == null) return "(empty)"; if (typeof x === "string") { try { return JSON.stringify(JSON.parse(x), null, 2); } catch { return x; } } return JSON.stringify(x, null, 2); };
+
+// Renders one HTTP round trip as a collapsible block.
+function exchangeHtml(ex) {
+  if (!ex) return "";
+  const status = ex.networkError ? `network error: ${esc(ex.networkError)}` : `${ex.status} ${esc(ex.statusText || "")}`;
+  return `<div class="http"><b>${ex.method}</b> ${esc(ex.url)} → <b>${status}</b> · ${ex.durationMs} ms${ex.mock ? " · mock" : ""}</div>
+    <details class="http-details" ${$("debug").checked ? "open" : ""}><summary>HTTP details</summary>
+      <div class="http">request body</div><pre>${esc(pretty(ex.requestBody))}</pre>
+      <div class="http">response headers</div><pre>${esc(pretty(ex.responseHeaders || {}))}</pre>
+      <div class="http">response body (raw)</div><pre>${esc(ex.responseBody == null ? "(none)" : ex.responseBody)}</pre>
+      <div class="http">reproduce (token masked)</div><pre>${esc(ex.curl)}</pre>
+    </details>`;
+}
 
 function renderSteps() {
   $("steps").innerHTML = STEP_TITLES.map((t, i) =>
@@ -100,23 +164,46 @@ function updateStep(ev) {
   li.querySelector(".title").textContent = ev.title;
   const msg = li.querySelector(".msg");
   msg.textContent = ev.message || (state === "running" ? "…" : "");
-  if (ev.detail) {
-    const d = document.createElement("details");
-    d.innerHTML = `<summary>response</summary><pre>${JSON.stringify(ev.detail, null, 2).replace(/</g, "&lt;")}</pre>`;
-    msg.appendChild(d);
-  }
+  if (ev.hint) msg.insertAdjacentHTML("beforeend", `<div class="hint">${esc(ev.hint)}</div>`);
+  msg.insertAdjacentHTML("beforeend", exchangeHtml(ev.exchange));
+  log(`step${ev.n}`, ev.state === "running" ? `${ev.title}…` : { state: ev.state, message: ev.message, status: ev.exchange && ev.exchange.status, ms: ev.exchange && ev.exchange.durationMs, body: ev.exchange && ev.exchange.responseBody },
+      { running: "run", ok: "ok", warn: "err", error: "err" }[state]);
 }
+
+// ---- connection test ----
+$("test").addEventListener("click", async () => {
+  $("test").disabled = true;
+  $("diag").classList.remove("hidden");
+  $("diagKv").innerHTML = "<dt>status</dt><dd>running…</dd>";
+  $("diagProbe").innerHTML = "";
+  try {
+    const d = await (await fetch(`/api/diagnostics?listId=${encodeURIComponent($("listId").value)}`)).json();
+    log("diagnostics", d, d.probe && d.probe.ok ? "ok" : "err");
+    $("diagKv").innerHTML = [
+      ["public IP", `${esc(d.publicIp)} <span class="cfg">(this is what Adestra sees; allowlist it on the token/user)</span>`],
+      ["API host DNS", esc(Array.isArray(d.dns) ? d.dns.join(", ") : d.dns)],
+      ["API base", esc(d.baseUrl)], ["token", esc(d.tokenMasked)], ["mode", d.mock ? "MOCK" : "live"], ["node", esc(d.node)],
+    ].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+    const p = d.probe || {};
+    $("diagProbe").innerHTML = `<div class="result ${p.ok ? "ok" : "fail"}">${p.ok ? "✓ " : "✕ "}${esc(p.message)}</div>` +
+      (p.hint ? `<div class="hint">${esc(p.hint)}</div>` : "") + exchangeHtml(p.exchange);
+  } catch (e) {
+    $("diagKv").innerHTML = `<dt>error</dt><dd>${esc(e.message)}</dd>`;
+  } finally { $("test").disabled = false; }
+});
 
 function showResult(ok, text) {
   const r = $("result");
   r.className = "result " + (ok ? "ok" : "fail");
   r.textContent = text;
+  log("done", text, ok ? "ok" : "err");
 }
 
 $("form").addEventListener("submit", async (e) => {
   e.preventDefault();
   $("go").disabled = true;
   renderSteps();
+  log("submit", { email: $("email").value, listId: $("listId").value, campaignId: $("campaignId").value });
   try {
     const res = await fetch("/api/optin", {
       method: "POST", headers: { "Content-Type": "application/json" },

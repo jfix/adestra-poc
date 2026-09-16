@@ -27,6 +27,19 @@ To try the UI without credentials set `ADESTRA_MOCK=1` in `.env` (all API calls 
 Step 4 passes `transaction_data` (`email`, `list_id`, `contact_id`, `requested_at`) which your
 campaign template can use as the `transaction` variable, e.g. to build a confirmation link.
 
+## Debugging
+
+- **Test connection** (button in the UI, or `GET /api/diagnostics`) shows the public IP Adestra
+  sees, DNS for the API host, the masked token, and runs a read-only `GET /lists/{id}` probe.
+- Every step shows the HTTP round trip: method, URL, status, duration, request body, response
+  headers, raw response body, and a curl command to reproduce it (token masked). Tick
+  **show HTTP details** to expand them by default.
+- Known errors get a plain-language hint, e.g. `401 {"error":"ip"}` means the token is fine but
+  this machine's IP is not on the token's allowlist in Adestra.
+- The **Event log** card keeps a timestamped record of everything for the session; **copy** puts it
+  on the clipboard for pasting into a ticket.
+- The server also logs each API call with status and timing to stdout.
+
 ## Things to know
 
 - The welcome campaign must be **published**, otherwise Adestra answers 409 "Campaign has not been published".
