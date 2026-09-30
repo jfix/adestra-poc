@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Host page demo</title>
+  <link rel="stylesheet" href="/demo.css">
+</head>
+<body>
+  <header>Example host page</header>
+  <main>
+    <h1>Stay informed</h1>
+    <p>This page simulates a third-party website that embeds the sign-up form via an iframe.
+      The dashed outline shows the iframe's fixed 120px box.</p>
+
+    <iframe src="/" title="Newsletter sign-up" height="120"></iframe>
+
+    <p>Content below the iframe should never move when the form is submitted.</p>
+
+    <section>
+      <h2>Debug: Adestra request/response</h2>
+      <pre id="debug">Submit the form to see the raw exchange.</pre>
+    </section>
+  </main>
+  <script src="/demo.js"></script>
+</body>
+</html>

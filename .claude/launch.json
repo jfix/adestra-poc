@@ -4,13 +4,7 @@
     {
       "name": "adestra-poc",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["server.js"],
-      "port": 3000
-    },
-    {
-      "name": "adestra-poc-mock",
-      "runtimeExecutable": "env",
-      "runtimeArgs": ["ADESTRA_MOCK=1", "ADESTRA_LIST_ID=7", "ADESTRA_CAMPAIGN_ID=16", "PORT=3000", "node", "server.js"],
+      "runtimeArgs": ["--use-system-ca", "--env-file=.env", "server.mjs"],
       "port": 3000
     }
   ]

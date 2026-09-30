@@ -1,0 +1,138 @@
+import { createServer } from 'node:http';
+import { readFile } from 'node:fs/promises';
+
+const { ADESTRA_API_TOKEN, ADESTRA_TABLE_ID, ADESTRA_LIST_ID, PORT = 3000 } = process.env;
+
+if (!ADESTRA_API_TOKEN || !ADESTRA_TABLE_ID || !ADESTRA_LIST_ID) {
+  console.error('Missing ADESTRA_API_TOKEN, ADESTRA_TABLE_ID or ADESTRA_LIST_ID in .env');
+  process.exit(1);
+}
+
+const STATIC_FILES = {
+  '/': ['index.html', 'text/html; charset=utf-8'],
+  '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
+  '/style.css': ['style.css', 'text/css; charset=utf-8'],
+  '/demo': ['demo.html', 'text/html; charset=utf-8'],
+  '/demo.css': ['demo.css', 'text/css; charset=utf-8'],
+  '/demo.js': ['demo.js', 'text/javascript; charset=utf-8'],
+};
+
+const SECURITY_HEADERS = {
+  // POC: any site may embed the iframe; restrict frame-ancestors before going live
+  'Content-Security-Policy': "default-src 'self'; frame-ancestors *",
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+};
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MAX_BODY_BYTES = 1024;
+
+const RATE_LIMIT = 5;
+const RATE_WINDOW_MS = 60_000;
+const hits = new Map();
+
+function rateLimited(ip) {
+  const now = Date.now();
+  const recent = (hits.get(ip) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
+  recent.push(now);
+  hits.set(ip, recent);
+  return recent.length > RATE_LIMIT;
+}
+
+function sendJson(res, status, body) {
+  res.writeHead(status, { ...SECURITY_HEADERS, 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(body));
+}
+
+async function readBody(req) {
+  let size = 0;
+  const chunks = [];
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) throw new Error('Body too large');
+    chunks.push(chunk);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
+async function createContact(email) {
+  const payload = {
+    table_id: Number(ADESTRA_TABLE_ID),
+    contact_data: { email },
+    options: { list_id: Number(ADESTRA_LIST_ID) },
+  };
+  const started = Date.now();
+  const res = await fetch('https://app.adestra.com/api/rest/1/contacts', {
+    method: 'POST',
+    headers: {
+      Authorization: `TOKEN ${ADESTRA_API_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  const text = await res.text();
+  let body = text;
+  try { body = JSON.parse(text); } catch {}
+  return {
+    status: res.status,
+    text,
+    debug: {
+      request: { method: 'POST', url: res.url, body: payload },
+      response: { status: res.status, statusText: res.statusText, body },
+      durationMs: Date.now() - started,
+    },
+  };
+}
+
+async function handleSubscribe(req, res) {
+  if (rateLimited(req.socket.remoteAddress)) {
+    return sendJson(res, 429, { ok: false, message: 'Too many attempts. Please try again in a minute.' });
+  }
+
+  let email;
+  try {
+    email = String((await readBody(req)).email ?? '').trim();
+  } catch {
+    return sendJson(res, 400, { ok: false, message: 'Invalid request.' });
+  }
+  if (email.length > 254 || !EMAIL_RE.test(email)) {
+    return sendJson(res, 400, { ok: false, message: 'Please enter a valid email address.' });
+  }
+
+  try {
+    const result = await createContact(email);
+    console.log(new Date().toISOString(), 'Adestra', result.status, result.text);
+    const { debug } = result;
+
+    if (result.status === 201) {
+      return sendJson(res, 200, { ok: true, message: 'Thanks! Please check your inbox to confirm.', debug });
+    }
+    if (result.status === 400) {
+      return sendJson(res, 400, { ok: false, message: 'This email address was not accepted.', debug });
+    }
+    return sendJson(res, 502, { ok: false, message: 'Sign-up is temporarily unavailable. Please try later.', debug });
+  } catch (err) {
+    const cause = err.cause ?? err;
+    console.error(new Date().toISOString(), 'Adestra request failed:', cause);
+    const debug = { error: String(cause.message ?? cause), code: cause.code };
+    return sendJson(res, 502, { ok: false, message: 'Could not reach the server. Please try later.', debug });
+  }
+}
+
+createServer(async (req, res) => {
+  const { pathname } = new URL(req.url, 'http://localhost');
+
+  if (req.method === 'POST' && pathname === '/api/subscribe') {
+    return handleSubscribe(req, res);
+  }
+
+  const file = STATIC_FILES[pathname];
+  if (req.method === 'GET' && file) {
+    const [name, type] = file;
+    res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': type });
+    return res.end(await readFile(new URL(`./public/${name}`, import.meta.url)));
+  }
+
+  res.writeHead(404, SECURITY_HEADERS);
+  res.end('Not found');
+}).listen(PORT, () => console.log(`Listening on http://localhost:${PORT}`));

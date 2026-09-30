@@ -1,0 +1,72 @@
+* { box-sizing: border-box; }
+
+[hidden] { display: none !important; }
+
+/* Fixed height so the embedding iframe never needs resizing */
+html, body {
+  height: 120px;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  font: 16px/1.4 system-ui, sans-serif;
+  color: #222;
+  padding: 12px;
+}
+
+label {
+  display: block;
+  height: 22px;
+  font-weight: 600;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  height: 40px;
+}
+
+input {
+  flex: 1;
+  min-width: 0;
+  padding: 0 10px;
+  font: inherit;
+  border: 1px solid #888;
+  border-radius: 4px;
+}
+
+button {
+  padding: 0 16px;
+  font: inherit;
+  color: #fff;
+  background: #0b5cad;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+button:disabled { opacity: 0.6; cursor: default; }
+
+#result {
+  height: 96px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+#message {
+  margin: 0;
+  font-weight: 600;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+#result.ok #message { color: #1a7f37; }
+#result.error #message { color: #b42318; }
+
+#retry { height: 32px; }
