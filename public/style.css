@@ -4,7 +4,7 @@
 
 /* Fixed height so the embedding iframe never needs resizing */
 html, body {
-  height: 120px;
+  height: 210px;
   margin: 0;
   overflow: hidden;
 }
@@ -49,7 +49,7 @@ button {
 button:disabled { opacity: 0.6; cursor: default; }
 
 #result {
-  height: 96px;
+  height: 186px;
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -70,3 +70,15 @@ button:disabled { opacity: 0.6; cursor: default; }
 #result.error #message { color: #b42318; }
 
 #retry { height: 32px; }
+
+#turnstile {
+  margin-top: 12px;
+  min-height: 65px;
+  width: 100%;
+}
+
+#verification-status {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 18px;
+}

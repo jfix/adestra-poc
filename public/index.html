@@ -11,8 +11,10 @@
     <label for="email">Email address</label>
     <div class="row">
       <input id="email" name="email" type="email" autocomplete="email" required maxlength="254" placeholder="you@example.com">
-      <button type="submit">Subscribe</button>
+      <button type="submit" disabled>Subscribe</button>
     </div>
+    <div id="turnstile"></div>
+    <p id="verification-status" role="status" aria-live="polite"></p>
   </form>
   <div id="result" role="status" aria-live="polite" hidden>
     <p id="message"></p>

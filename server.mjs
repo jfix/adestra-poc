@@ -4,7 +4,21 @@ import { readFile } from 'node:fs/promises';
 const {
   ADESTRA_API_TOKEN, ADESTRA_TABLE_ID, ADESTRA_LIST_ID,
   ADESTRA_LANGUAGE, ADESTRA_SOURCE_PATH, PORT = 3000,
+  TURNSTILE_SITE_KEY = '1x00000000000000000000AA',
+  TURNSTILE_SECRET_KEY = '1x0000000000000000000000000000000AA',
+  TURNSTILE_HOSTNAME,
 } = process.env;
+
+if (!TURNSTILE_SITE_KEY || !TURNSTILE_SECRET_KEY) {
+  console.error('Missing TURNSTILE_SITE_KEY or TURNSTILE_SECRET_KEY');
+  process.exit(1);
+}
+const turnstileTestMode = /^[123]x0+/.test(TURNSTILE_SITE_KEY) || /^[123]x0+/.test(TURNSTILE_SECRET_KEY);
+if (process.env.NODE_ENV === 'production' && (turnstileTestMode || !TURNSTILE_HOSTNAME)) {
+  console.error('Production requires real Turnstile keys and TURNSTILE_HOSTNAME');
+  process.exit(1);
+}
+if (turnstileTestMode) console.warn('Turnstile test keys enabled: this is not bot protection for production.');
 
 if (!ADESTRA_API_TOKEN || !ADESTRA_TABLE_ID || !ADESTRA_LIST_ID) {
   console.error('Missing ADESTRA_API_TOKEN, ADESTRA_TABLE_ID or ADESTRA_LIST_ID in .env');
@@ -31,13 +45,13 @@ const STATIC_FILES = {
 
 const SECURITY_HEADERS = {
   // POC: any site may embed the iframe; restrict frame-ancestors before going live
-  'Content-Security-Policy': "default-src 'self'; frame-ancestors *",
+  'Content-Security-Policy': "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; frame-src 'self' https://challenges.cloudflare.com; frame-ancestors *",
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
 };
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const MAX_BODY_BYTES = 1024;
+const MAX_BODY_BYTES = 16 * 1024;
 
 const RATE_LIMIT = 5;
 const RATE_WINDOW_MS = 60_000;
@@ -100,19 +114,48 @@ async function createContact(email) {
   };
 }
 
+async function verifyTurnstile(token) {
+  const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ secret: TURNSTILE_SECRET_KEY, response: token }),
+    signal: AbortSignal.timeout(10_000),
+    redirect: 'error',
+  });
+  if (!response.ok) throw new Error('Turnstile verification unavailable');
+  const validation = await response.json();
+  return validation.success === true
+    && (turnstileTestMode || validation.action === 'subscribe')
+    && (!TURNSTILE_HOSTNAME || validation.hostname === TURNSTILE_HOSTNAME);
+}
+
 async function handleSubscribe(req, res) {
   if (rateLimited(req.socket.remoteAddress)) {
     return sendJson(res, 429, { ok: false, message: 'Too many attempts. Please try again in a minute.' });
   }
 
   let email;
+  let turnstileToken;
   try {
-    email = String((await readBody(req)).email ?? '').trim();
+    const body = await readBody(req);
+    email = String(body.email ?? '').trim();
+    turnstileToken = body.turnstileToken;
   } catch {
     return sendJson(res, 400, { ok: false, message: 'Invalid request.' });
   }
   if (email.length > 254 || !EMAIL_RE.test(email)) {
     return sendJson(res, 400, { ok: false, message: 'Please enter a valid email address.' });
+  }
+  if (typeof turnstileToken !== 'string' || !turnstileToken.trim() || turnstileToken.length > 2048) {
+    return sendJson(res, 400, { ok: false, message: 'Please complete the verification.' });
+  }
+
+  try {
+    if (!await verifyTurnstile(turnstileToken)) {
+      return sendJson(res, 400, { ok: false, message: 'Verification failed or expired. Please try again.' });
+    }
+  } catch {
+    return sendJson(res, 503, { ok: false, message: 'Verification is temporarily unavailable. Please try again.' });
   }
 
   try {
@@ -137,6 +180,11 @@ async function handleSubscribe(req, res) {
 
 createServer(async (req, res) => {
   const { pathname } = new URL(req.url, 'http://localhost');
+
+  if (req.method === 'GET' && pathname === '/api/config') {
+    res.setHeader('Cache-Control', 'no-store');
+    return sendJson(res, 200, { turnstileSiteKey: TURNSTILE_SITE_KEY });
+  }
 
   if (req.method === 'POST' && pathname === '/api/subscribe') {
     return handleSubscribe(req, res);
