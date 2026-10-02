@@ -1,10 +1,22 @@
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 
-const { ADESTRA_API_TOKEN, ADESTRA_TABLE_ID, ADESTRA_LIST_ID, PORT = 3000 } = process.env;
+const {
+  ADESTRA_API_TOKEN, ADESTRA_TABLE_ID, ADESTRA_LIST_ID,
+  ADESTRA_LANGUAGE, ADESTRA_SOURCE_PATH, PORT = 3000,
+} = process.env;
 
 if (!ADESTRA_API_TOKEN || !ADESTRA_TABLE_ID || !ADESTRA_LIST_ID) {
   console.error('Missing ADESTRA_API_TOKEN, ADESTRA_TABLE_ID or ADESTRA_LIST_ID in .env');
+  process.exit(1);
+}
+
+if (ADESTRA_LANGUAGE && !['en', 'fr'].includes(ADESTRA_LANGUAGE)) {
+  console.error('ADESTRA_LANGUAGE must be en or fr');
+  process.exit(1);
+}
+if (ADESTRA_SOURCE_PATH && ADESTRA_SOURCE_PATH.length > 1024) {
+  console.error('ADESTRA_SOURCE_PATH must not exceed 1024 characters');
   process.exit(1);
 }
 
@@ -58,7 +70,11 @@ async function readBody(req) {
 async function createContact(email) {
   const payload = {
     table_id: Number(ADESTRA_TABLE_ID),
-    contact_data: { email },
+    contact_data: {
+      email,
+      ...(ADESTRA_LANGUAGE ? { language: ADESTRA_LANGUAGE } : {}),
+      ...(ADESTRA_SOURCE_PATH ? { source_path: ADESTRA_SOURCE_PATH } : {}),
+    },
     options: { list_id: Number(ADESTRA_LIST_ID) },
   };
   const started = Date.now();

@@ -23,6 +23,13 @@ Copy-Item .env.example .env
 | `ADESTRA_TABLE_ID` | Core table the contact is stored in (`145` = "DKI testing list") |
 | `ADESTRA_LIST_ID` | List the contact is added to; must belong to the same core table (`4508`, workspace 100) |
 | `PORT` | Optional, web app port (default `3000`) |
+| `ADESTRA_LANGUAGE` | Optional, `en` or `fr`; sent as the core-table field `language` by the server and CLI |
+| `ADESTRA_SOURCE_PATH` | Optional, source page path (maximum 1024 characters); sent as the core-table field `source_path` by the server and CLI. Use an Adestra Large Text field for values longer than 255 characters. |
+
+These values are shared defaults for this deployment, not automatically captured
+from the embedding page. Both fields must exist on the configured core table.
+Subsequent signups for the same email can overwrite them; they do not retain
+per-newsletter signup history or automatically select an opt-in campaign.
 
 ## Usage
 
