@@ -25,12 +25,13 @@ Copy-Item .env.example .env
 | `PORT` | Optional, web app port (default `3000`) |
 | `ADESTRA_LANGUAGE` | Optional, `en` or `fr`; sent as the core-table field `language` by the server and CLI |
 | `ADESTRA_SOURCE_PATH` | Optional, source page path (maximum 1024 characters); sent as the core-table field `source_path` by the server and CLI. Use an Adestra Large Text field for values longer than 255 characters. |
+| `ADESTRA_NEWSLETTER_TITLE` | Optional, title of the newsletter; sent as the core-table field `newsletter_title` by the server and CLI |
 | `TURNSTILE_SITE_KEY` | Public widget key; defaults to Cloudflare's always-pass test site key |
 | `TURNSTILE_SECRET_KEY` | Server-only verification key; defaults to Cloudflare's always-pass test secret |
 | `TURNSTILE_HOSTNAME` | Expected widget hostname (no scheme or port); required in production |
 
 These values are shared defaults for this deployment, not automatically captured
-from the embedding page. Both fields must exist on the configured core table.
+from the embedding page. These fields must exist on the configured core table.
 Subsequent signups for the same email can overwrite them; they do not retain
 per-newsletter signup history or automatically select an opt-in campaign.
 

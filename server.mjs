@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 
 const {
   ADESTRA_API_TOKEN, ADESTRA_TABLE_ID, ADESTRA_LIST_ID,
-  ADESTRA_LANGUAGE, ADESTRA_SOURCE_PATH, PORT = 3000,
+  ADESTRA_LANGUAGE, ADESTRA_SOURCE_PATH, ADESTRA_NEWSLETTER_TITLE, PORT = 3000,
   TURNSTILE_SITE_KEY = '1x00000000000000000000AA',
   TURNSTILE_SECRET_KEY = '1x0000000000000000000000000000000AA',
   TURNSTILE_HOSTNAME,
@@ -88,6 +88,7 @@ async function createContact(email) {
       email,
       ...(ADESTRA_LANGUAGE ? { language: ADESTRA_LANGUAGE } : {}),
       ...(ADESTRA_SOURCE_PATH ? { source_path: ADESTRA_SOURCE_PATH } : {}),
+      ...(ADESTRA_NEWSLETTER_TITLE ? { newsletter_title: ADESTRA_NEWSLETTER_TITLE } : {}),
     },
     options: { list_id: Number(ADESTRA_LIST_ID) },
   };

@@ -7,7 +7,8 @@ const {
     ADESTRA_LAST_NAME,
     ADESTRA_TITLE,
     ADESTRA_LANGUAGE,
-    ADESTRA_SOURCE_PATH
+    ADESTRA_SOURCE_PATH,
+    ADESTRA_NEWSLETTER_TITLE
 } = process.env;
 
 if (!ADESTRA_API_TOKEN || 
@@ -35,7 +36,8 @@ const body = {
     last_name: ADESTRA_LAST_NAME,
     title: ADESTRA_TITLE,
     ...(ADESTRA_LANGUAGE ? { language: ADESTRA_LANGUAGE } : {}),
-    ...(ADESTRA_SOURCE_PATH ? { source_path: ADESTRA_SOURCE_PATH } : {})
+    ...(ADESTRA_SOURCE_PATH ? { source_path: ADESTRA_SOURCE_PATH } : {}),
+    ...(ADESTRA_NEWSLETTER_TITLE ? { newsletter_title: ADESTRA_NEWSLETTER_TITLE } : {})
   },
   options: { list_id: Number(ADESTRA_LIST_ID) },
 };
